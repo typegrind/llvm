@@ -18,6 +18,7 @@
 #include "llvm/IR/DiagnosticInfo.h"
 #include "llvm/IR/ModuleSummaryIndex.h"
 #include "llvm/Support/Endian.h"
+#include "llvm/Support/Error.h"
 #include "llvm/Support/ErrorOr.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include <memory>
@@ -26,51 +27,115 @@ namespace llvm {
   class LLVMContext;
   class Module;
 
+  // These functions are for converting Expected/Error values to
+  // ErrorOr/std::error_code for compatibility with legacy clients. FIXME:
+  // Remove these functions once no longer needed by the C and libLTO APIs.
+
+  std::error_code errorToErrorCodeAndEmitErrors(LLVMContext &Ctx, Error Err);
+
+  template <typename T>
+  ErrorOr<T> expectedToErrorOrAndEmitErrors(LLVMContext &Ctx, Expected<T> Val) {
+    if (!Val)
+      return errorToErrorCodeAndEmitErrors(Ctx, Val.takeError());
+    return std::move(*Val);
+  }
+
+  /// Represents a module in a bitcode file.
+  class BitcodeModule {
+    // This covers the identification (if present) and module blocks.
+    ArrayRef<uint8_t> Buffer;
+    StringRef ModuleIdentifier;
+
+    // The bitstream location of the IDENTIFICATION_BLOCK.
+    uint64_t IdentificationBit;
+
+    // The bitstream location of this module's MODULE_BLOCK.
+    uint64_t ModuleBit;
+
+    BitcodeModule(ArrayRef<uint8_t> Buffer, StringRef ModuleIdentifier,
+                  uint64_t IdentificationBit, uint64_t ModuleBit)
+        : Buffer(Buffer), ModuleIdentifier(ModuleIdentifier),
+          IdentificationBit(IdentificationBit), ModuleBit(ModuleBit) {}
+
+    // Calls the ctor.
+    friend Expected<std::vector<BitcodeModule>>
+    getBitcodeModuleList(MemoryBufferRef Buffer);
+
+    Expected<std::unique_ptr<Module>> getModuleImpl(LLVMContext &Context,
+                                                    bool MaterializeAll,
+                                                    bool ShouldLazyLoadMetadata,
+                                                    bool IsImporting);
+
+  public:
+    StringRef getBuffer() const {
+      return StringRef((const char *)Buffer.begin(), Buffer.size());
+    }
+
+    StringRef getModuleIdentifier() const { return ModuleIdentifier; }
+
+    /// Read the bitcode module and prepare for lazy deserialization of function
+    /// bodies. If ShouldLazyLoadMetadata is true, lazily load metadata as well.
+    /// If IsImporting is true, this module is being parsed for ThinLTO
+    /// importing into another module.
+    Expected<std::unique_ptr<Module>> getLazyModule(LLVMContext &Context,
+                                                    bool ShouldLazyLoadMetadata,
+                                                    bool IsImporting);
+
+    /// Read the entire bitcode module and return it.
+    Expected<std::unique_ptr<Module>> parseModule(LLVMContext &Context);
+
+    /// Check if the given bitcode buffer contains a summary block.
+    Expected<bool> hasSummary();
+
+    /// Parse the specified bitcode buffer, returning the module summary index.
+    Expected<std::unique_ptr<ModuleSummaryIndex>> getSummary();
+  };
+
+  /// Returns a list of modules in the specified bitcode buffer.
+  Expected<std::vector<BitcodeModule>>
+  getBitcodeModuleList(MemoryBufferRef Buffer);
+
   /// Read the header of the specified bitcode buffer and prepare for lazy
   /// deserialization of function bodies. If ShouldLazyLoadMetadata is true,
-  /// lazily load metadata as well.
-  ErrorOr<std::unique_ptr<Module>>
+  /// lazily load metadata as well. If IsImporting is true, this module is
+  /// being parsed for ThinLTO importing into another module.
+  Expected<std::unique_ptr<Module>>
   getLazyBitcodeModule(MemoryBufferRef Buffer, LLVMContext &Context,
-                       bool ShouldLazyLoadMetadata = false);
+                       bool ShouldLazyLoadMetadata = false,
+                       bool IsImporting = false);
 
   /// Like getLazyBitcodeModule, except that the module takes ownership of
   /// the memory buffer if successful. If successful, this moves Buffer. On
-  /// error, this *does not* move Buffer.
-  ErrorOr<std::unique_ptr<Module>>
-  getOwningLazyBitcodeModule(std::unique_ptr<MemoryBuffer> &&Buffer,
-                             LLVMContext &Context,
-                             bool ShouldLazyLoadMetadata = false);
+  /// error, this *does not* move Buffer. If IsImporting is true, this module is
+  /// being parsed for ThinLTO importing into another module.
+  Expected<std::unique_ptr<Module>> getOwningLazyBitcodeModule(
+      std::unique_ptr<MemoryBuffer> &&Buffer, LLVMContext &Context,
+      bool ShouldLazyLoadMetadata = false, bool IsImporting = false);
 
   /// Read the header of the specified bitcode buffer and extract just the
   /// triple information. If successful, this returns a string. On error, this
   /// returns "".
-  std::string getBitcodeTargetTriple(MemoryBufferRef Buffer,
-                                     LLVMContext &Context);
+  Expected<std::string> getBitcodeTargetTriple(MemoryBufferRef Buffer);
 
   /// Return true if \p Buffer contains a bitcode file with ObjC code (category
   /// or class) in it.
-  bool isBitcodeContainingObjCCategory(MemoryBufferRef Buffer,
-                                       LLVMContext &Context);
+  Expected<bool> isBitcodeContainingObjCCategory(MemoryBufferRef Buffer);
 
   /// Read the header of the specified bitcode buffer and extract just the
   /// producer string information. If successful, this returns a string. On
   /// error, this returns "".
-  std::string getBitcodeProducerString(MemoryBufferRef Buffer,
-                                       LLVMContext &Context);
+  Expected<std::string> getBitcodeProducerString(MemoryBufferRef Buffer);
 
   /// Read the specified bitcode file, returning the module.
-  ErrorOr<std::unique_ptr<Module>> parseBitcodeFile(MemoryBufferRef Buffer,
-                                                    LLVMContext &Context);
+  Expected<std::unique_ptr<Module>> parseBitcodeFile(MemoryBufferRef Buffer,
+                                                     LLVMContext &Context);
 
   /// Check if the given bitcode buffer contains a summary block.
-  bool
-  hasGlobalValueSummary(MemoryBufferRef Buffer,
-                        const DiagnosticHandlerFunction &DiagnosticHandler);
+  Expected<bool> hasGlobalValueSummary(MemoryBufferRef Buffer);
 
   /// Parse the specified bitcode buffer, returning the module summary index.
-  ErrorOr<std::unique_ptr<ModuleSummaryIndex>>
-  getModuleSummaryIndex(MemoryBufferRef Buffer,
-                        const DiagnosticHandlerFunction &DiagnosticHandler);
+  Expected<std::unique_ptr<ModuleSummaryIndex>>
+  getModuleSummaryIndex(MemoryBufferRef Buffer);
 
   /// isBitcodeWrapper - Return true if the given bytes are the magic bytes
   /// for an LLVM IR bitcode wrapper.

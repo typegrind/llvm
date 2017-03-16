@@ -259,7 +259,8 @@ void LLVMSetTarget(LLVMModuleRef M, const char *Triple) {
 }
 
 void LLVMDumpModule(LLVMModuleRef M) {
-  unwrap(M)->dump();
+  unwrap(M)->print(errs(), nullptr,
+                   /*ShouldPreserveUseListOrder=*/false, /*IsForDebug=*/true);
 }
 
 LLVMBool LLVMPrintModuleToFile(LLVMModuleRef M, const char *Filename,
@@ -358,9 +359,11 @@ LLVMContextRef LLVMGetTypeContext(LLVMTypeRef Ty) {
   return wrap(&unwrap(Ty)->getContext());
 }
 
-void LLVMDumpType(LLVMTypeRef Ty) {
+#if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
+LLVM_DUMP_METHOD void LLVMDumpType(LLVMTypeRef Ty) {
   return unwrap(Ty)->dump();
 }
+#endif
 
 char *LLVMPrintTypeToString(LLVMTypeRef Ty) {
   std::string buf;
@@ -578,8 +581,11 @@ LLVMTypeRef LLVMVectorType(LLVMTypeRef ElementType, unsigned ElementCount) {
   return wrap(VectorType::get(unwrap(ElementType), ElementCount));
 }
 
-LLVMTypeRef LLVMGetElementType(LLVMTypeRef Ty) {
-  return wrap(unwrap<SequentialType>(Ty)->getElementType());
+LLVMTypeRef LLVMGetElementType(LLVMTypeRef WrappedTy) {
+  auto *Ty = unwrap<Type>(WrappedTy);
+  if (auto *PTy = dyn_cast<PointerType>(Ty))
+    return wrap(PTy->getElementType());
+  return wrap(cast<SequentialType>(Ty)->getElementType());
 }
 
 unsigned LLVMGetArrayLength(LLVMTypeRef ArrayTy) {
@@ -637,8 +643,8 @@ void LLVMSetValueName(LLVMValueRef Val, const char *Name) {
   unwrap(Val)->setName(Name);
 }
 
-void LLVMDumpValue(LLVMValueRef Val) {
-  unwrap(Val)->dump();
+LLVM_DUMP_METHOD void LLVMDumpValue(LLVMValueRef Val) {
+  unwrap(Val)->print(errs(), /*IsForDebug=*/true);
 }
 
 char* LLVMPrintValueToString(LLVMValueRef Val) {
@@ -980,7 +986,7 @@ double LLVMConstRealGetDouble(LLVMValueRef ConstantVal, LLVMBool *LosesInfo) {
 
   bool APFLosesInfo;
   APFloat APF = cFP->getValueAPF();
-  APF.convert(APFloat::IEEEdouble, APFloat::rmNearestTiesToEven, &APFLosesInfo);
+  APF.convert(APFloat::IEEEdouble(), APFloat::rmNearestTiesToEven, &APFLosesInfo);
   *LosesInfo = APFLosesInfo;
   return APF.convertToDouble();
 }
@@ -1842,12 +1848,16 @@ void LLVMAddAttributeAtIndex(LLVMValueRef F, LLVMAttributeIndex Idx,
 
 unsigned LLVMGetAttributeCountAtIndex(LLVMValueRef F, LLVMAttributeIndex Idx) {
   auto *ASN = AttributeSetNode::get(unwrap<Function>(F)->getAttributes(), Idx);
+  if (!ASN)
+    return 0;
   return ASN->getNumAttributes();
 }
 
 void LLVMGetAttributesAtIndex(LLVMValueRef F, LLVMAttributeIndex Idx,
                               LLVMAttributeRef *Attrs) {
   auto *ASN = AttributeSetNode::get(unwrap<Function>(F)->getAttributes(), Idx);
+  if (!ASN)
+    return;
   for (auto A: make_range(ASN->begin(), ASN->end()))
     *Attrs++ = wrap(A);
 }
@@ -2173,6 +2183,8 @@ unsigned LLVMGetCallSiteAttributeCount(LLVMValueRef C,
                                        LLVMAttributeIndex Idx) {
   auto CS = CallSite(unwrap<Instruction>(C));
   auto *ASN = AttributeSetNode::get(CS.getAttributes(), Idx);
+  if (!ASN)
+    return 0;
   return ASN->getNumAttributes();
 }
 
@@ -2180,6 +2192,8 @@ void LLVMGetCallSiteAttributes(LLVMValueRef C, LLVMAttributeIndex Idx,
                                LLVMAttributeRef *Attrs) {
   auto CS = CallSite(unwrap<Instruction>(C));
   auto *ASN = AttributeSetNode::get(CS.getAttributes(), Idx);
+  if (!ASN)
+    return;
   for (auto A: make_range(ASN->begin(), ASN->end()))
     *Attrs++ = wrap(A);
 }

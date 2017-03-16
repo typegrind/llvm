@@ -18,18 +18,30 @@
 #ifndef LLVM_IR_FUNCTION_H
 #define LLVM_IR_FUNCTION_H
 
+#include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/ilist_node.h"
 #include "llvm/ADT/iterator_range.h"
+#include "llvm/ADT/StringRef.h"
 #include "llvm/IR/Argument.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/CallingConv.h"
 #include "llvm/IR/GlobalObject.h"
+#include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/OperandTraits.h"
+#include "llvm/IR/SymbolTableListTraits.h"
+#include "llvm/IR/Value.h"
 #include "llvm/Support/Compiler.h"
+#include <cassert>
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <string>
 
 namespace llvm {
 
 template <typename T> class Optional;
+class AssemblyAnnotationWriter;
 class FunctionType;
 class LLVMContext;
 class DISubprogram;
@@ -88,10 +100,8 @@ private:
     if (hasLazyArguments())
       BuildLazyArguments();
   }
-  void BuildLazyArguments() const;
 
-  Function(const Function&) = delete;
-  void operator=(const Function&) = delete;
+  void BuildLazyArguments() const;
 
   /// Function ctor - If the (optional) Module argument is specified, the
   /// function is automatically inserted into the end of the function list for
@@ -101,12 +111,14 @@ private:
            const Twine &N = "", Module *M = nullptr);
 
 public:
+  Function(const Function&) = delete;
+  void operator=(const Function&) = delete;
+  ~Function() override;
+
   static Function *Create(FunctionType *Ty, LinkageTypes Linkage,
                           const Twine &N = "", Module *M = nullptr) {
     return new Function(Ty, Linkage, N, M);
   }
-
-  ~Function() override;
 
   // Provide fast operand accessors.
   DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
@@ -133,7 +145,11 @@ public:
   /// The particular intrinsic functions which correspond to this value are
   /// defined in llvm/Intrinsics.h.
   Intrinsic::ID getIntrinsicID() const LLVM_READONLY { return IntID; }
-  bool isIntrinsic() const { return getName().startswith("llvm."); }
+
+  /// isIntrinsic - Returns true if the function's name starts with "llvm.".
+  /// It's possible for this function to return true while getIntrinsicID()
+  /// returns Intrinsic::not_intrinsic!
+  bool isIntrinsic() const { return HasLLVMReservedName; }
 
   static Intrinsic::ID lookupIntrinsicID(StringRef Name);
 
@@ -192,14 +208,21 @@ public:
   /// \brief Set the entry count for this function.
   ///
   /// Entry count is the number of times this function was executed based on
-  /// pgo data.
-  void setEntryCount(uint64_t Count);
+  /// pgo data. \p Imports points to a set of GUIDs that needs to be imported
+  /// by the function for sample PGO, to enable the same inlines as the
+  /// profiled optimized binary.
+  void setEntryCount(uint64_t Count,
+                     const DenseSet<GlobalValue::GUID> *Imports = nullptr);
 
   /// \brief Get the entry count for this function.
   ///
   /// Entry count is the number of times the function was executed based on
   /// pgo data.
   Optional<uint64_t> getEntryCount() const;
+
+  /// Returns the set of GUIDs that needs to be imported to the function for
+  /// sample PGO, to enable the same inlines as the profiled optimized binary.
+  DenseSet<GlobalValue::GUID> getImportGUIDs() const;
 
   /// Set the section prefix for this function.
   void setSectionPrefix(StringRef Prefix);
@@ -489,12 +512,14 @@ public:
     CheckLazyArguments();
     return ArgumentList;
   }
+
   static ArgumentListType Function::*getSublistAccess(Argument*) {
     return &Function::ArgumentList;
   }
 
   const BasicBlockListType &getBasicBlockList() const { return BasicBlocks; }
         BasicBlockListType &getBasicBlockList()       { return BasicBlocks; }
+
   static BasicBlockListType Function::*getSublistAccess(BasicBlock*) {
     return &Function::BasicBlocks;
   }
@@ -538,6 +563,7 @@ public:
     CheckLazyArguments();
     return ArgumentList.begin();
   }
+
   arg_iterator arg_end() {
     CheckLazyArguments();
     return ArgumentList.end();
@@ -550,7 +576,6 @@ public:
   iterator_range<arg_iterator> args() {
     return make_range(arg_begin(), arg_end());
   }
-
   iterator_range<const_arg_iterator> args() const {
     return make_range(arg_begin(), arg_end());
   }
@@ -654,6 +679,9 @@ public:
   /// to \a DISubprogram.
   DISubprogram *getSubprogram() const;
 
+  /// Returns true if we should emit debug info for profiling.
+  bool isDebugInfoForProfiling() const;
+
 private:
   void allocHungoffUselist();
   template<int Idx> void setHungoffOperand(Constant *C);
@@ -671,6 +699,6 @@ struct OperandTraits<Function> : public HungoffOperandTraits<3> {};
 
 DEFINE_TRANSPARENT_OPERAND_ACCESSORS(Function, Value)
 
-} // End llvm namespace
+} // end namespace llvm
 
-#endif
+#endif // LLVM_IR_FUNCTION_H

@@ -22,6 +22,12 @@
 using namespace llvm;
 using namespace object;
 
+static llvm::cl::opt<bool> IgnoreEmptyThinLTOIndexFile(
+    "ignore-empty-index-file", llvm::cl::ZeroOrMore,
+    llvm::cl::desc(
+        "Ignore an empty index file and perform non-ThinLTO compilation"),
+    llvm::cl::init(false));
+
 ModuleSummaryIndexObjectFile::ModuleSummaryIndexObjectFile(
     MemoryBufferRef Object, std::unique_ptr<ModuleSummaryIndex> I)
     : SymbolicFile(Binary::ID_ModuleSummaryIndex, Object), Index(std::move(I)) {
@@ -67,59 +73,42 @@ ModuleSummaryIndexObjectFile::findBitcodeInMemBuffer(MemoryBufferRef Object) {
   }
 }
 
-// Looks for module summary index in the given memory buffer.
-// returns true if found, else false.
-bool ModuleSummaryIndexObjectFile::hasGlobalValueSummaryInMemBuffer(
-    MemoryBufferRef Object,
-    const DiagnosticHandlerFunction &DiagnosticHandler) {
-  ErrorOr<MemoryBufferRef> BCOrErr = findBitcodeInMemBuffer(Object);
-  if (!BCOrErr)
-    return false;
-
-  return hasGlobalValueSummary(BCOrErr.get(), DiagnosticHandler);
-}
-
 // Parse module summary index in the given memory buffer.
 // Return new ModuleSummaryIndexObjectFile instance containing parsed
 // module summary/index.
-ErrorOr<std::unique_ptr<ModuleSummaryIndexObjectFile>>
-ModuleSummaryIndexObjectFile::create(
-    MemoryBufferRef Object,
-    const DiagnosticHandlerFunction &DiagnosticHandler) {
-  std::unique_ptr<ModuleSummaryIndex> Index;
-
+Expected<std::unique_ptr<ModuleSummaryIndexObjectFile>>
+ModuleSummaryIndexObjectFile::create(MemoryBufferRef Object) {
   ErrorOr<MemoryBufferRef> BCOrErr = findBitcodeInMemBuffer(Object);
   if (!BCOrErr)
-    return BCOrErr.getError();
+    return errorCodeToError(BCOrErr.getError());
 
-  ErrorOr<std::unique_ptr<ModuleSummaryIndex>> IOrErr =
-      getModuleSummaryIndex(BCOrErr.get(), DiagnosticHandler);
+  Expected<std::unique_ptr<ModuleSummaryIndex>> IOrErr =
+      getModuleSummaryIndex(BCOrErr.get());
 
-  if (std::error_code EC = IOrErr.getError())
-    return EC;
+  if (!IOrErr)
+    return IOrErr.takeError();
 
-  Index = std::move(IOrErr.get());
-
+  std::unique_ptr<ModuleSummaryIndex> Index = std::move(IOrErr.get());
   return llvm::make_unique<ModuleSummaryIndexObjectFile>(Object,
                                                          std::move(Index));
 }
 
 // Parse the module summary index out of an IR file and return the summary
 // index object if found, or nullptr if not.
-ErrorOr<std::unique_ptr<ModuleSummaryIndex>> llvm::getModuleSummaryIndexForFile(
-    StringRef Path, const DiagnosticHandlerFunction &DiagnosticHandler) {
+Expected<std::unique_ptr<ModuleSummaryIndex>>
+llvm::getModuleSummaryIndexForFile(StringRef Path) {
   ErrorOr<std::unique_ptr<MemoryBuffer>> FileOrErr =
       MemoryBuffer::getFileOrSTDIN(Path);
   std::error_code EC = FileOrErr.getError();
   if (EC)
-    return EC;
+    return errorCodeToError(EC);
   MemoryBufferRef BufferRef = (FileOrErr.get())->getMemBufferRef();
-  ErrorOr<std::unique_ptr<object::ModuleSummaryIndexObjectFile>> ObjOrErr =
-      object::ModuleSummaryIndexObjectFile::create(BufferRef,
-                                                   DiagnosticHandler);
-  EC = ObjOrErr.getError();
-  if (EC)
-    return EC;
+  if (IgnoreEmptyThinLTOIndexFile && !BufferRef.getBufferSize())
+    return nullptr;
+  Expected<std::unique_ptr<object::ModuleSummaryIndexObjectFile>> ObjOrErr =
+      object::ModuleSummaryIndexObjectFile::create(BufferRef);
+  if (!ObjOrErr)
+    return ObjOrErr.takeError();
 
   object::ModuleSummaryIndexObjectFile &Obj = **ObjOrErr;
   return Obj.takeIndex();
